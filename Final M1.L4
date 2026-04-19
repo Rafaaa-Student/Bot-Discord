@@ -1,13 +1,30 @@
+import asyncio
 import discord
 import os
-# print(os.listdir('images'))
-from discord.ext import commands
-from bagian_awal import gen_pass  # Impor fungsi gen_pass
+import string
+from discord.ext import commands  # Impor fungsi gen_pass
 import random  # Untuk fitur tambahan, jika diperlukan
 import requests
+from bs4 import BeautifulSoup
 import json
 import time
 import datetime
+import socket
+from urllib.parse import urljoin
+
+try:
+    import certifi
+
+    _HTTP_VERIFY = certifi.where()
+except ImportError:
+    _HTTP_VERIFY = True
+
+
+def http_get(url, **kwargs):
+    """GET dengan CA bundle certifi (membantu SSL di Windows); jangan blokir event loop dari coroutine."""
+    if "verify" not in kwargs:
+        kwargs["verify"] = _HTTP_VERIFY
+    return requests.get(url, **kwargs)
 
 # Konfigurasi intents
 # Intents
@@ -15,6 +32,159 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='$', intents=intents)
+
+#fitur **BETA** WEB SCRAPING
+def ambil_quotes_dari_web():
+    url = "https://quotes.toscrape.com/"
+    respon = http_get(url, timeout=20)
+    soup = BeautifulSoup(respon.text, 'html.parser')
+    
+    daftar_kotak = soup.find_all('div', class_='quote')
+    semua_data = [] # List untuk nampung hasil scrap
+    
+    for kotak in daftar_kotak:
+        teks = kotak.find('span', class_='text').text
+        penulis = kotak.find('small', class_='author').text
+        semua_data.append(f"{teks} — *{penulis}*")
+    
+    return semua_data
+
+def scrap_treehugger():
+    # Target: Website Books to Scrape
+    url = "https://books.toscrape.com/catalogue/category/books_1/index.html"
+    
+    try:
+        respon = http_get(url, timeout=10)
+        soup = BeautifulSoup(respon.text, 'html.parser')
+        
+        # Di website ini, judul buku ada di dalam tag <h3> lalu di dalam tag <a>
+        # Kita ambil semua tag <h3>
+        book_elements = soup.find_all('h3')
+        
+        print(f"--- DEBUG: Berhasil nemu {len(book_elements)} buku di web ---")
+        
+        daftar_hasil = []
+        for book in book_elements:
+            # Ambil teks dari tag <a> yang ada di dalam <h3>
+            judul = book.find('a')['title'] 
+            daftar_hasil.append(judul)
+            
+        return daftar_hasil
+    except Exception as e:
+        print(f"--- DEBUG ERROR: {e} ---")
+        return []
+
+def ambil_detail_buku_acak():
+    url_utama = "https://books.toscrape.com/"
+    
+    try:
+        # Gunakan requests langsung jika http_get adalah custom function kamu
+        respon = requests.get(url_utama, timeout=10) 
+        soup = BeautifulSoup(respon.text, 'html.parser')
+        
+        daftar_buku = soup.find_all('article', class_='product_pod')
+        if not daftar_buku: return None
+        
+        buku_pilihan = random.choice(daftar_buku)
+        link_relatif = buku_pilihan.h3.a['href']
+        
+        # LOGIKA LINK YANG AMAN:
+        # Jika link_relatif mengandung 'catalogue/', kita gabung ke url_utama
+        # Jika tidak, kita tambahkan 'catalogue/' di tengahnya
+        if "catalogue/" in link_relatif:
+            link_lengkap = url_utama + link_relatif
+        else:
+            link_lengkap = url_utama + "catalogue/" + link_relatif
+        
+        respon_detail = requests.get(link_lengkap, timeout=10)
+        soup_detail = BeautifulSoup(respon_detail.text, 'html.parser')
+        
+        judul = soup_detail.find('h1').text.strip()
+        harga = soup_detail.find('p', class_='price_color').text.strip()
+        
+        deskripsi_tag = soup_detail.find('div', id='product_description')
+        deskripsi = deskripsi_tag.find_next('p').text.strip() if deskripsi_tag else "N/A"
+
+        return {
+            "judul": judul,
+            "harga": harga,
+            "deskripsi": deskripsi,
+            "url": link_lengkap
+        }
+    except Exception as e:
+        print(f"Error Detail Scraping: {e}")
+        return None
+    
+def ambil_banyak_buku(jumlah=25, delay_per_buku=0.5):
+    url_base = "https://books.toscrape.com/"
+    url_catalogue = "https://books.toscrape.com/catalogue/"
+    hasil_banyak = []
+    max_pages = 50 
+    pages_scraped = 0
+    listing_url = url_base
+
+    try:
+        while len(hasil_banyak) < jumlah and pages_scraped < max_pages:
+            pages_scraped += 1
+            # Pakai requests langsung jika http_get tidak didefinisikan
+            respon = requests.get(listing_url, timeout=15)
+            if respon.status_code != 200:
+                break
+            
+            soup = BeautifulSoup(respon.text, "html.parser")
+            daftar_buku = soup.find_all("article", class_="product_pod")
+
+            for b in daftar_buku:
+                if len(hasil_banyak) >= jumlah:
+                    break
+                
+                try:
+                    link_relatif = b.h3.a["href"]
+                    # Logika cerdas: gabungkan link relatif dengan benar
+                    if "catalogue/" in link_relatif:
+                        link_lengkap = url_base + link_relatif.replace("catalogue/", "catalogue/")
+                    else:
+                        link_lengkap = url_catalogue + link_relatif
+                    
+                    # Bersihkan double slash jika ada
+                    link_lengkap = link_lengkap.replace("catalogue/catalogue/", "catalogue/")
+                except:
+                    continue
+
+                res_detail = requests.get(link_lengkap, timeout=15)
+                if res_detail.status_code != 200:
+                    continue
+
+                s_detail = BeautifulSoup(res_detail.text, "html.parser")
+                h1 = s_detail.find("h1")
+                if not h1: continue
+                
+                judul = h1.text.strip()
+                price_el = s_detail.find("p", class_="price_color")
+                harga = price_el.text.strip() if price_el else "N/A"
+                desc_tag = s_detail.find("div", id="product_description")
+                deskripsi = desc_tag.find_next("p").text.strip() if desc_tag and desc_tag.find_next("p") else "N/A"
+
+                hasil_banyak.append({
+                    "judul": judul,
+                    "harga": harga,
+                    "deskripsi": deskripsi,
+                    "url": link_lengkap,
+                })
+                time.sleep(delay_per_buku)
+
+            # Cari tombol "Next" untuk pindah halaman
+            next_a = soup.select_one("ul.pager li.next a")
+            if not next_a:
+                break
+            
+            # Update URL untuk halaman berikutnya
+            listing_url = urljoin(listing_url, next_a["href"])
+
+        return hasil_banyak
+    except Exception as e:
+        print(f"Error scraping banyak: {e}")
+        return hasil_banyak # Kembalikan apa yang sudah didapat sejauh ini
 
 # Data
 emoji_list = ["😀", "😂", "🤣", "😍", "🥰", "😎", "🤔", "😴", "🤖", "👻", "🦄", "🌟", "🔥", "🎉", "🍕", "☕", "🏆", "🎮", "🚀"]
@@ -77,11 +247,13 @@ LEVEL_BADGES = {
 }
 
 USER_LAST_ACTION = {}
+LAST_SEARCH_TIME = {}  # Untuk menyimpan waktu terakhir user melakukan $Cari
 
 POIN_FILE = "poin_hijau.json"
 STORY_LOG_FILE = "story_log.json"
 EVENT_FILE = "event_eksklusif.json"
 TIPS_LOG_FILE = "tips_daily_log.json"
+CACHE_FILE = "database_buku_log.json"
 
 def muat_tips_log():
     if os.path.exists(TIPS_LOG_FILE):
@@ -162,9 +334,10 @@ async def on_message(message):
 
 # Commands
 @bot.command()
-async def Fungsi(ctx):
+async def Start(ctx):
     await ctx.send(
 """📌 **Daftar Perintah Bot** 📌
+Bot ini memiliki berbagai perintah seru yang bisa kamu coba! Berikut adalah daftar perintah yang tersedia:
 
 0. `$Halo` - Menyapa bot.
 1. `$Goodbye` - Balasan emot 😊.
@@ -177,24 +350,49 @@ async def Fungsi(ctx):
 8. `$Koin` - Melempar koin (Kepala/Ekor).
 9. `$Bebek` - Mengirimkan gambar bebek random 🦆.
 10. `$Rubah` - Mengirimkan gambar rubah random 🦊.
-11. `$Pilah <nama_sampah>` - Mengetahui kategori sampah (organik/anorganik/berbahaya).
-12. `$Kategori` - Melihat isi kategori sampah.
-13. `$Tambah_Kategori <kategori> <nama_sampah>` - Menambahkan sampah baru ke kategori.
-
-♻️ **Fitur Aksi Hijau:**
-14. `$Green_Action` - Menampilkan daftar Rekomendasi aksi ramah lingkungan.
-15. `$Action <nama aktivitas>` - Melakukan aksi ramah lingkungan (misal: menanam pohon) dan dapat poin hijau. (Hanya aksi yang terdaftar akan diterima!)
-16. `$Points` - Melihat jumlah poin hijau kamu.
-17. `$Leaderboard` - Melihat pengguna dengan poin tertinggi dalam aksi hijau.
-18. `$Add_Action <nama aksi>` - Mengusulkan aksi hijau baru ke daftar aksi yang sah.
-19. `$Event` - Menambah event eksklusif.
-20. `$Claim` - Membuat Aktivitas sesuai yang berada dalam event(HANYA 1 ORANG PERTAMA YANG BISA KLAIM!).
-21. `$Levelbadge` - Menampilkan List badge yang bisa didapat di permainan.
-22. `$Story` - Storytelling tentang aktivitas menghijaukan lingkungan yang kamu lakukan.
+14. `$FungsiHijau` - Menampilkan daftar perintah terkait fitur hijau.
+15. `$FungsiScraping` - Menampilkan daftar perintah terkait fitur web scraping.
 
 📝 Catatan:
 - Untuk `$Ulang`, contoh: `$Ulang 3 Halo` → Maka akan mengulang "Halo" sebanyak 3 kali.
+"""
+)
+
+@bot.command()
+async def FungsiHijau(ctx):
+    await ctx.send(
+"""📌 **Daftar Perintah Bot** 📌
+
+♻️ **Fitur Aksi Hijau:**
+1. `$Green_Action` - Menampilkan daftar Rekomendasi aksi ramah lingkungan.
+2. `$Action <nama aktivitas>` - Melakukan aksi ramah lingkungan (misal: menanam pohon) dan dapat poin hijau. (Hanya aksi yang terdaftar akan diterima!)
+3. `$Points` - Melihat jumlah poin hijau kamu.
+4. `$Leaderboard` - Melihat pengguna dengan poin tertinggi dalam aksi hijau.
+5. `$Add_Action <nama aksi>` - Mengusulkan aksi hijau baru ke daftar aksi yang sah.
+6. `$Event` - Menambah event eksklusif.
+7. `$Claim` - Membuat Aktivitas sesuai yang berada dalam event(HANYA 1 ORANG PERTAMA YANG BISA KLAIM!).
+8. `$Levelbadge` - Menampilkan List badge yang bisa didapat di permainan.
+9. `$Story` - Storytelling tentang aktivitas menghijaukan lingkungan yang kamu lakukan.
+10. `$Pilah <nama_sampah>` - Mengetahui kategori sampah (organik/anorganik/berbahaya).
+11. `$Kategori` - Melihat isi kategori sampah.
+12. `$Tambah_Kategori <kategori> <nama_sampah>` - Menambahkan sampah baru ke kategori.
+13. `$Hijau` - Menjelaskan apa itu fitur aksi hijau dan bagaimana cara kerjanya di bot.
+
+📝 Catatan:
 - Untuk `$Tambah_Kategori`, contoh: `$Tambah_Kategori organik pisang` → Menambahkan "pisang" ke kategori "organik".
+"""
+)
+
+@bot.command()
+async def FungsiScraping(ctx):
+    await ctx.send(
+"""📌 **Daftar Perintah Bot** 📌
+
+🕸️ **Fitur Web Scraping:**
+1. `$Quotes` - Mengambil dan menampilkan kata-kata mutiara dari website.
+2. `$Books` - Mencari rekomendasi buku dari website Books to Scrape (dengan cooldown 30 menit).
+3. `$BookDescription` - Buku acak **cepat** dari website Books to Scrape dengan deskripsi singkat.
+4. `$WebScraping` - Menjelaskan apa itu web scraping dan bagaimana fitur ini bekerja di bot.
 """
 )
 
@@ -211,8 +409,13 @@ async def Apalah(ctx, count_heh: int = 5):
     await ctx.send("he" * count_heh)
 
 @bot.command()
-async def Passgen(ctx, count_heh=10):
-    await ctx.send(gen_pass(count_heh))
+async def Passgen(ctx, jumlah: int = 12):
+    if jumlah < 4 or jumlah > 64:
+        await ctx.send("⚠️ Panjang password harus antara **4** dan **64**.")
+        return
+    chars = string.ascii_letters + string.digits + "!@#$%^&*"
+    sandi = "".join(random.choice(chars) for _ in range(jumlah))
+    await ctx.send(f"🔐 Password acak ({jumlah} karakter):\n`{sandi}`")
 
 @bot.command()
 async def Menambahkan(ctx, left: int, right: int):
@@ -240,20 +443,26 @@ async def Koin(ctx):
     await ctx.send(f"Hasil lemparan koin: ***{random.choice(['Kepala', 'Ekor'])}***")
 
 def get_duck_image_url():
-    res = requests.get('https://random-d.uk/api/random')
-    return res.json()['url']
+    res = http_get("https://random-d.uk/api/random", timeout=15)
+    return res.json()["url"]
 
 @bot.command(name='Bebek')
 async def Bebek(ctx):
-    await ctx.send(get_duck_image_url())
+    url = await asyncio.to_thread(get_duck_image_url)
+    await ctx.send(url)
 
 def get_fox_image():
-    res = requests.get('https://randomfox.ca/floof')
-    return res.json()['image']
+    res = http_get("https://randomfox.ca/floof", timeout=15)
+    return res.json()["image"]
 
 @bot.command(name='Rubah')
 async def Rubah(ctx):
-    await ctx.send(get_fox_image())
+    url = await asyncio.to_thread(get_fox_image)
+    await ctx.send(url)
+
+@bot.command()
+async def Hijau(ctx):
+    await ctx.send(f'**🌍Fitur Aksi Hijau adalah sebuah permainan interaktif yang dirancang untuk mendorong pengguna melakukan tindakan ramah lingkungan dalam kehidupan sehari-hari. Dengan menggunakan perintah khusus, pengguna dapat mencatat aksi hijau yang mereka lakukan, mendapatkan poin, naik level, dan bersaing di leaderboard. Fitur ini bertujuan untuk meningkatkan kesadaran dan partisipasi dalam pelestarian lingkungan dengan cara yang menyenangkan dan memotivasi!** 🌿')
 
 @bot.command()
 async def Pilah(ctx, *, sampah: str):
@@ -388,9 +597,13 @@ async def Story(ctx, *, cerita: str):
         await ctx.send("⚠️ Cerita yang sama sudah kamu kirim sebelumnya. Hindari spam untuk mendapatkan poin ya 🌱")
         return
 
+    kata_unik = {k.lower() for k in kata}
+    if len(kata_unik) < (len(kata) * 0.6):
+        await ctx.send("⚠️ Ceritanya jangan cuma copy-paste atau mengulang kata yang sama terus ya! Ayo lebih kreatif.")
+        return
+
     cerita_lower = cerita.lower()
     cocok_aksi = []
-
     for aksi in aksi_sah:
         if aksi.lower() in cerita_lower:
             cocok_aksi.append(aksi)
@@ -398,28 +611,19 @@ async def Story(ctx, *, cerita: str):
     if cocok_aksi:
         poin_didapat = 5 * len(cocok_aksi)
         tambah_poin(ctx.author.id, poin_didapat)
-
-        # Simpan cerita terbaru ke log
         story_log[user_id] = cerita
         simpan_story_log(story_log)
-
         aksi_terdeteksi = "\n- " + "\n- ".join(cocok_aksi)
         await ctx.send(
             f"📘 Cerita kamu:\n_{cerita}_\n\n✅ Ditemukan **{len(cocok_aksi)} aksi hijau**:{aksi_terdeteksi}\n"
             f"🎉 Kamu mendapat **+{poin_didapat} poin hijau!**"
         )
-
-    kata_unik = set(k.lower() for k in kata) # Menghitung kata yang berbeda saja
-    if len(kata_unik) < (len(kata) * 0.6): 
-        await ctx.send("⚠️ Ceritanya jangan cuma copy-paste atau mengulang kata yang sama terus ya! Ayo lebih kreatif.")
         return
-    
-    else:
-        await ctx.send(
-            f"📘 Cerita kamu:\n_{cerita}_\n\n❌ Belum ditemukan aksi hijau dari daftar yang sah.\n"
-            f"Coba ceritakan aktivitas yang berkaitan dengan pelestarian lingkungan ya 🍀"
-        )
 
+    await ctx.send(
+        f"📘 Cerita kamu:\n_{cerita}_\n\n❌ Belum ditemukan aksi hijau dari daftar yang sah.\n"
+        f"Coba ceritakan aktivitas yang berkaitan dengan pelestarian lingkungan ya 🍀"
+    )
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -534,5 +738,229 @@ async def reset_tips_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("🚫 Cuma **Admin** yang punya kunci untuk mereset jatah poin!")
 
-TOKEN = "
+#WEB SCRAPING FUNCTION
+@bot.command()
+async def WebScraping(ctx):
+    await ctx.send(
+        "**Web Scraping** adalah teknik mengambil data otomatis dari website. "
+        "Di bot ini: `$Quotes` dan `$Books` mengambil langsung dari web; "
+        "koleksi buku lengkap disimpan di JSON oleh pemilik bot (`$TrueAdminBookDescription`), "
+        "lalu `$BookDescription` membaca dari file itu supaya responsnya ringan dan cepat. 🌐✨"
+    )
+
+@bot.command()
+async def Quotes(ctx):
+    await ctx.send("🔎 Lagi nyari kata-kata mutiara di internet... tunggu ya!")
+    
+    try:
+        hasil = await asyncio.to_thread(ambil_quotes_dari_web)
+        
+        # Pilih satu quote secara acak dari 10 hasil scraping
+        quote_pilihan = random.choice(hasil)
+        
+        # Kirim ke Discord
+        await ctx.send(quote_pilihan)
+        
+    except Exception as e:
+        await ctx.send(f"Waduh, gagal ngambil data karena: {e}")
+
+@bot.command()
+async def Books(ctx):
+    global LAST_SEARCH_TIME
+    user_id = str(ctx.author.id)
+    waktu_sekarang = time.time()
+    durasi_cooldown = 1800 # 30 menit
+
+    # 1. Cek Cooldown
+    if user_id in LAST_SEARCH_TIME:
+        selisih = waktu_sekarang - LAST_SEARCH_TIME[user_id]
+        if selisih < durasi_cooldown:
+            menit = int((durasi_cooldown - selisih) / 60)
+            return await ctx.send(f"⏳ **Sabar, Kawan!** Bot lagi istirahat. Tunggu **{menit} menit** lagi ya.")
+
+    await ctx.send("📚 **Membuka Perpustakaan Digital...** Mencari buku keren untukmu!")
+
+    data_buku = await asyncio.to_thread(scrap_treehugger)
+    
+    if data_buku:
+        pilihan_buku = random.choice(data_buku)
+        
+        # 3. Tambah Poin (+2 Poin)
+        tambah_poin(ctx.author.id, 2)
+        
+        # 4. Simpan Waktu
+        LAST_SEARCH_TIME[user_id] = waktu_sekarang
+        
+        msg = f"📖 **Rekomendasi Buku Hari Ini:**\n"
+        msg += f"> **{pilihan_buku}**\n\n"
+        msg += f"✨ Wah, kamu baru saja mengeksplorasi literatur! Dapat **+2 poin!** 🌟\n"
+        msg += f"*Sumber: Books to Scrape*"
+        
+        await ctx.send(msg)
+    else:
+        await ctx.send("❌ Gagal terhubung ke perpustakaan. Coba lagi nanti!")
+
+@bot.command()
+@commands.has_permissions(administrator=True) # Hanya kamu (Admin) yang bisa panggil
+async def BooksAdmin(ctx):
+    """
+    Mode Rahasia: Ngecek apakah website Books to Scrape masih lancar
+    tanpa harus nunggu cooldown 30 menit.
+    """
+    await ctx.send("🛠️ **[ADMIN MODE]** Menghubungkan ke Perpustakaan Books to Scrape...")
+
+    try:
+        data_buku = await asyncio.to_thread(scrap_treehugger)
+        
+        if data_buku:
+            # Admin bisa lihat berapa banyak buku yang berhasil ditarik totalnya
+            total_buku = len(data_buku)
+            pilihan = random.choice(data_buku)
+            
+            msg = f"🔍 **Hasil Diagnosa Sistem:**\n"
+            msg += f"> Berhasil menarik **{total_buku}** judul buku hari ini.\n"
+            msg += f"> Contoh judul: **{pilihan}**\n\n"
+            msg += f"✅ **Status:** Koneksi Stabil. Fitur multifungsi siap digunakan user!"
+            
+            await ctx.send(msg)
+        else:
+            await ctx.send("❌ **Status:** Gagal! Website merespon tapi data kosong. Cek struktur HTML!")
+
+    except Exception as e:
+        await ctx.send(f"⚠️ **Sistem Error:** {e}")
+
+# Pesan otomatis kalau ada user biasa (bukan admin) yang sotoy mau pake perintah ini
+@BooksAdmin.error
+async def admin_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ **Akses Ditolak!** Perintah ini hanya untuk developer bot.")
+
+@bot.command()
+async def BookDescription(ctx):
+    """Hanya baca JSON lokal — cepat. Pengisian database = `$TrueAdminBookDescription`."""
+    data_buku_cache = []
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            try:
+                data_buku_cache = json.load(f)
+            except json.JSONDecodeError:
+                data_buku_cache = []
+
+    if not data_buku_cache:
+        await ctx.send(
+            "📚 **Perpustakaan lokal masih kosong.**\n"
+            "Pemilik bot bisa mengisi dengan `$TrueAdminBookDescription <jumlah>` "
+            "(scraping ke web, lalu simpan ke JSON). Setelah ada data, perintah ini jadi instan."
+        )
+        return
+
+    await ctx.send("📖 **Membuka entri acak dari perpustakaan lokal…**")
+    buku = random.choice(data_buku_cache)
+    sumber = "Perpustakaan lokal (JSON)"
+
+    judul = buku.get("judul", "Tanpa Judul")
+    harga = buku.get("harga", "N/A")
+    sinopsis = buku.get("deskripsi", "Tidak ada sinopsis.")
+    url = buku.get("url", "https://books.toscrape.com/")
+
+    if len(sinopsis) > 500:
+        sinopsis = sinopsis[:500] + "..."
+
+    msg = f"📖 **Informasi Buku Lengkap** 📖\n"
+    msg += f"*(Sumber: {sumber})*\n\n"
+    msg += f"**Judul:** {judul}\n"
+    msg += f"**Harga:** {harga}\n"
+    msg += f"**Sinopsis:**\n> {sinopsis}\n\n"
+    msg += f"🔗 **Link Lengkap:** <{url}>\n"
+    msg += f"✨ *Perpustakaan lokal: **{len(data_buku_cache)}** judul.*"
+    await ctx.send(msg)
+
+@bot.command()
+@commands.is_owner()
+async def TrueAdminBookDescription(ctx, jumlah: int = 25):
+    if jumlah < 1:
+        await ctx.send("⚠️ Jumlah minimal **1**.")
+        return
+    if jumlah > 100: # Batasi 100 dulu ya biar gak kena ban/spam
+        await ctx.send("⚠️ Maksimal **100** buku per perintah biar bot gak kecapekan.")
+        return
+
+    await ctx.send(f"🚀 **True Admin Mode:** Mengambil **{jumlah}** buku. Proses ini berjalan di *background thread*...")
+
+    try:
+        # Menjalankan fungsi blocking (requests) di thread terpisah agar bot gak lag
+        buku_baru_list = await asyncio.to_thread(ambil_banyak_buku, jumlah)
+        
+        if not buku_baru_list:
+            await ctx.send("❌ Gagal mengambil data. Cek koneksi.")
+            return
+
+        data_lama = []
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                try:
+                    data_lama = json.load(f)
+                except:
+                    data_lama = []
+
+        judul_ada = [b["judul"] for b in data_lama]
+        buku_ditambahkan = 0
+
+        for buku in buku_baru_list:
+            if buku["judul"] not in judul_ada:
+                data_lama.append(buku)
+                judul_ada.append(buku["judul"])
+                buku_ditambahkan += 1
+
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data_lama, f, indent=4, ensure_ascii=False)
+
+        msg = f"✅ **Update Selesai!**\n"
+        msg += f"Baru ditambahkan: **{buku_ditambahkan}**\n"
+        msg += f"Total Koleksi: **{len(data_lama)}** buku."
+        
+        await ctx.send(msg)
+
+    except Exception as e:
+        await ctx.send(f"❌ Terjadi error sistem: {e}")
+
+# Pesan Error jika yang memanggil bukan Admin
+@TrueAdminBookDescription.error
+async def admin_error(ctx, error):
+    if isinstance(error, commands.NotOwner):
+        await ctx.send("⛔ **Akses Ditolak!** Perintah ini hanya bisa digunakan oleh Pengembang Bot (True_Admin).")
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise SystemExit(
+        "Set environment variable DISCORD_TOKEN to your bot token before running.\n"
+        "If your token was ever pasted into code or chat, revoke it in the Discord "
+        "Developer Portal and create a new one."
+    )
+
+def cek_dns_discord():
+    """Discord pakai hostname discord.com; kalau DNS gagal, bot tidak akan bisa login."""
+    try:
+        socket.getaddrinfo("discord.com", 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise SystemExit(
+            "\n=== Gagal DNS / jaringan (bukan bug kode bot) ===\n"
+            "PC tidak bisa menerjemahkan alamat discord.com (getaddrinfo gagal).\n\n"
+            "Coba urut ini:\n"
+            "  1) Buka https://discord.com di browser — kalau tidak bisa, masalahnya jaringan/DNS.\n"
+            "  2) Ganti DNS Windows ke 8.8.8.8 dan 8.8.4.4, atau 1.1.1.1.\n"
+            "  3) Matikan VPN / hotspot sekolah yang memblokir Discord; coba hotspot HP.\n"
+            "  4) Restart router; matikan sementara 'HTTPS scanning' di antivirus.\n\n"
+            f"Detail: {e}\n"
+        ) from e
+
+cek_dns_discord()
+
+def catat_log_nyala():
+    waktu_sekarang = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open("bot_history.txt", "a") as f:
+        f.write(f"Bot dinyalakan pada: {waktu_sekarang}\n")
+
+# Panggil sebelum bot.run
+catat_log_nyala()
 bot.run(TOKEN)
