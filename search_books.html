@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Search Books - Bot Raffasya VII{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h2>🔍 Cari Buku</h2>
+            </div>
+            <div class="card-body">
+                <form method="post">
+                    <div class="mb-3">
+                        <label for="keyword" class="form-label">Keyword (Judul atau Deskripsi)</label>
+                        <input type="text" class="form-control" id="keyword" name="keyword" required>
+                    </div>
+                    <button type="submit" class="btn btn-success">Cari</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
